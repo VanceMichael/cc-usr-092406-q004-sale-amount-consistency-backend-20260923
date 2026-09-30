@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict
+from typing import Optional, List, Union
 from datetime import date, datetime
 
 class PondBase(BaseModel):
@@ -221,6 +221,42 @@ class CostRecordResponse(CostRecordBase):
 class HarvestSaleBase(BaseModel):
     batch_id: int
     sale_date: date
+    weight: Union[float, str]
+    unit_price: Union[float, str]
+    buyer: Optional[str] = None
+    batch_number: Optional[str] = None
+    quality_grade: Optional[str] = None
+    notes: Optional[str] = None
+    price_scale: Optional[int] = None
+
+
+class HarvestSaleCreate(HarvestSaleBase):
+    # 仅用于向后兼容地解析旧客户端字段；服务端绝不采信，金额由 pricing 统一计算。
+    total_amount: Optional[Union[float, str]] = None
+
+
+class HarvestSaleUpdate(BaseModel):
+    # 重量/单价/精度/计价版本出现在这里仅为被服务层显式拦截并引导到更正接口，
+    # 绝不允许经普通 PUT 修改。
+    batch_id: Optional[int] = None
+    sale_date: Optional[date] = None
+    weight: Optional[Union[float, str]] = None
+    unit_price: Optional[Union[float, str]] = None
+    price_scale: Optional[int] = None
+    pricing_version: Optional[str] = None
+    buyer: Optional[str] = None
+    batch_number: Optional[str] = None
+    quality_grade: Optional[str] = None
+    notes: Optional[str] = None
+    total_amount: Optional[Union[float, str]] = None
+
+
+class HarvestSaleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    batch_id: int
+    sale_date: date
     weight: float
     unit_price: float
     total_amount: Optional[float] = None
@@ -228,27 +264,101 @@ class HarvestSaleBase(BaseModel):
     batch_number: Optional[str] = None
     quality_grade: Optional[str] = None
     notes: Optional[str] = None
+    weight_raw: Optional[str] = None
+    unit_price_raw: Optional[str] = None
+    price_scale: Optional[int] = None
+    pricing_version: Optional[str] = None
+    status: str
+    is_settled: bool = False
+    supersedes_id: Optional[int] = None
+    corrected_by_id: Optional[int] = None
+    created_by_correction_id: Optional[int] = None
+    created_at: datetime
 
-class HarvestSaleCreate(HarvestSaleBase):
-    pass
 
-class HarvestSaleUpdate(BaseModel):
-    batch_id: Optional[int] = None
+class SaleCorrectionCreate(BaseModel):
+    weight: Union[float, str]
+    unit_price: Union[float, str]
+    price_scale: Optional[int] = None
+    reason: Optional[str] = None
+    # 更正时可一并修正的非金额元数据（冲正方式下写入替代行）
     sale_date: Optional[date] = None
-    weight: Optional[float] = None
-    unit_price: Optional[float] = None
-    total_amount: Optional[float] = None
     buyer: Optional[str] = None
     batch_number: Optional[str] = None
     quality_grade: Optional[str] = None
     notes: Optional[str] = None
+    # 仅为兼容旧客户端，忽略
+    total_amount: Optional[Union[float, str]] = None
 
-class HarvestSaleResponse(HarvestSaleBase):
-    id: int
+
+class SaleCorrectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    correction_id: str
+    sale_id: int
+    batch_id: int
+    mode: str
+    reason: Optional[str] = None
+    old_weight: Optional[str] = None
+    old_unit_price: Optional[str] = None
+    old_price_scale: Optional[int] = None
+    old_total_amount: Optional[float] = None
+    old_pricing_version: Optional[str] = None
+    new_weight: Optional[str] = None
+    new_unit_price: Optional[str] = None
+    new_price_scale: Optional[int] = None
+    new_total_amount: Optional[float] = None
+    new_pricing_version: Optional[str] = None
+    reversed_sale_id: Optional[int] = None
+    replacement_sale_id: Optional[int] = None
+    replayed: bool = False
     created_at: datetime
 
-    class Config:
-        orm_mode = True
+
+class DataIssue(BaseModel):
+    sale_id: int
+    batch_id: int
+    issue_type: str
+    stored_amount: Optional[float] = None
+    expected_amount: float
+    price_scale: Optional[int] = None
+    pricing_version: Optional[str] = None
+
+
+class DataRepairReport(BaseModel):
+    scanned: int
+    issues: List[DataIssue] = []
+    repaired: int = 0
+    skipped_settled: int = 0
+    repaired_sale_ids: List[int] = []
+    settled_sale_ids: List[int] = []
+
+
+class BatchSettlementResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    batch_id: int
+    settlement_no: str
+    cutoff_version: str
+    total_revenue: float
+    sale_count: int
+    repaired_count: int
+    status: str
+    created_at: datetime
+
+
+class BatchSettlementSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    settlement_no: str
+    cutoff_version: str
+    total_revenue: float
+    sale_count: int
+    repaired_count: int
+    status: str
+    created_at: datetime
 
 class CostSummaryItem(BaseModel):
     type: str
@@ -276,6 +386,10 @@ class CultureCycleAnalysis(BaseModel):
     total_cost: float
     total_revenue: float
     profit: float
+    revenue_version: str = "v1"
+    sale_count: int = 0
+    settled: bool = False
+    settlement_no: Optional[str] = None
     cost_summary: Optional[dict] = None
     feeding_summary: Optional[dict] = None
 
@@ -311,11 +425,17 @@ class CostRecordTrace(BaseModel):
     description: Optional[str] = None
 
 class HarvestSaleTrace(BaseModel):
+    id: int
     sale_date: date
     weight: float
     unit_price: float
     total_amount: Optional[float] = None
     buyer: Optional[str] = None
+    status: str = "active"
+    price_scale: Optional[int] = None
+    pricing_version: Optional[str] = None
+    is_settled: bool = False
+    supersedes_id: Optional[int] = None
 
 class BatchInfo(BaseModel):
     batch_number: str
@@ -339,3 +459,9 @@ class BatchTraceability(BaseModel):
     medication_records: List[MedicationRecordTrace] = []
     cost_records: List[CostRecordTrace] = []
     harvest_sales: List[HarvestSaleTrace] = []
+    reversed_sales: List[HarvestSaleTrace] = []
+    total_revenue: float = 0
+    revenue_version: str = "v1"
+    sale_count: int = 0
+    settled: bool = False
+    settlement_no: Optional[str] = None
