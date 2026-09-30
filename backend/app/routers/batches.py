@@ -2,8 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from ..database import get_db
-from ..models import Batch, Pond
-from ..schemas import BatchCreate, BatchUpdate, BatchResponse
+from ..models import Batch, BatchSettlement, Pond
+from ..schemas import (
+    BatchCreate,
+    BatchUpdate,
+    BatchResponse,
+    SettlementCreate,
+    SettlementResponse,
+)
+from ..services import sales_service
 
 router = APIRouter(
     prefix="/api/batches",
@@ -15,11 +22,11 @@ def create_batch(batch: BatchCreate, db: Session = Depends(get_db)):
     db_pond = db.query(Pond).filter(Pond.id == batch.pond_id).first()
     if not db_pond:
         raise HTTPException(status_code=404, detail="塘口不存在")
-    
+
     db_batch = db.query(Batch).filter(Batch.batch_number == batch.batch_number).first()
     if db_batch:
         raise HTTPException(status_code=400, detail="批次号已存在")
-    
+
     new_batch = Batch(**batch.dict())
     db.add(new_batch)
     db.commit()
@@ -50,11 +57,11 @@ def update_batch(batch_id: int, batch: BatchUpdate, db: Session = Depends(get_db
     db_batch = db.query(Batch).filter(Batch.id == batch_id).first()
     if not db_batch:
         raise HTTPException(status_code=404, detail="批次不存在")
-    
+
     update_data = batch.dict(exclude_unset=True)
     for key, value in update_data.items():
         setattr(db_batch, key, value)
-    
+
     db.commit()
     db.refresh(db_batch)
     return db_batch
@@ -64,7 +71,30 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
     db_batch = db.query(Batch).filter(Batch.id == batch_id).first()
     if not db_batch:
         raise HTTPException(status_code=404, detail="批次不存在")
-    
+
     db.delete(db_batch)
     db.commit()
     return {"message": "批次删除成功"}
+
+
+@router.post("/{batch_id}/settle/", response_model=SettlementResponse)
+def settle_batch(batch_id: int, payload: SettlementCreate = SettlementCreate()):
+    """签署批次结算：生成连续 cutoff_version 快照并锁定当前销售条目。
+
+    并发重复签署由写锁 + 版本唯一约束 + 幂等键保证只产生一份结果。
+    """
+    return sales_service.settle_batch(batch_id, payload.idempotency_key)
+
+
+@router.get("/{batch_id}/settlements/", response_model=List[SettlementResponse])
+def list_settlements(batch_id: int, db: Session = Depends(get_db)):
+    batch = db.query(Batch).filter(Batch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="批次不存在")
+    rows = (
+        db.query(BatchSettlement)
+        .filter(BatchSettlement.batch_id == batch_id)
+        .order_by(BatchSettlement.version.asc())
+        .all()
+    )
+    return rows

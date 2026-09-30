@@ -6,6 +6,8 @@ from datetime import date
 from ..database import get_db
 from ..models import Batch, Pond, StockingRecord, FeedingRecord, CostRecord, HarvestSale, WaterQualityRecord, MedicationRecord
 from ..schemas import CultureCycleAnalysis, BatchTraceability, BatchInfo, PondInfo
+from ..services import pricing
+from ..services.versioning import visible_sales, get_settlement
 
 router = APIRouter(
     prefix="/api/analysis",
@@ -13,32 +15,31 @@ router = APIRouter(
 )
 
 @router.get("/cycle/{batch_id}/", response_model=CultureCycleAnalysis)
-def analyze_cycle(batch_id: int, db: Session = Depends(get_db)):
+def analyze_cycle(batch_id: int, cutoff_version: Optional[int] = None, db: Session = Depends(get_db)):
     batch = db.query(Batch).filter(Batch.id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="批次不存在")
-    
+
     pond = db.query(Pond).filter(Pond.id == batch.pond_id).first()
-    
+
     initial_quantity = db.query(func.sum(StockingRecord.quantity)).filter(
         StockingRecord.batch_id == batch.id
     ).scalar() or 0
-    
-    harvest_weight = db.query(func.sum(HarvestSale.weight)).filter(
-        HarvestSale.batch_id == batch.id
-    ).scalar() or 0
-    
+
+    # 销售口径统一走版本可见性：与追溯接口、销售详情在同一 cutoff_version 下一致
+    sales = visible_sales(db, batch.id, cutoff_version)
+    harvest_weight = float(pricing.decimal_sum(s.weight for s in sales))
+
     feed_total = db.query(func.sum(FeedingRecord.feed_quantity)).filter(
         FeedingRecord.batch_id == batch.id
     ).scalar() or 0
-    
+
     total_cost = db.query(func.sum(CostRecord.amount)).filter(
         CostRecord.batch_id == batch.id
     ).scalar() or 0
-    
-    total_revenue = db.query(func.sum(HarvestSale.total_amount)).filter(
-        HarvestSale.batch_id == batch.id
-    ).scalar() or 0
+
+    total_revenue_d = pricing.decimal_sum(s.total_amount for s in sales)
+    total_revenue = float(total_revenue_d)
     
     harvest_date = batch.actual_harvest_date
     days_cultured = None
@@ -122,41 +123,42 @@ def analyze_cycle(batch_id: int, db: Session = Depends(get_db)):
         total_cost=total_cost,
         total_revenue=total_revenue,
         profit=profit,
+        cutoff_version=cutoff_version,
         cost_summary=cost_summary_dict,
         feeding_summary=feeding_summary_result
     )
 
 @router.get("/traceability/{batch_id}/", response_model=BatchTraceability)
-def batch_traceability(batch_id: int, db: Session = Depends(get_db)):
+def batch_traceability(batch_id: int, cutoff_version: Optional[int] = None, db: Session = Depends(get_db)):
     batch = db.query(Batch).filter(Batch.id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="批次不存在")
-    
+
     pond = db.query(Pond).filter(Pond.id == batch.pond_id).first()
-    
+
     stocking_records = db.query(StockingRecord).filter(
         StockingRecord.batch_id == batch.id
     ).all()
-    
+
     feeding_records = db.query(FeedingRecord).filter(
         FeedingRecord.batch_id == batch.id
     ).all()
-    
+
     water_quality_records = db.query(WaterQualityRecord).filter(
         WaterQualityRecord.batch_id == batch.id
     ).all()
-    
+
     medication_records = db.query(MedicationRecord).filter(
         MedicationRecord.batch_id == batch.id
     ).all()
-    
+
     cost_records = db.query(CostRecord).filter(
         CostRecord.batch_id == batch.id
     ).all()
-    
-    harvest_sales = db.query(HarvestSale).filter(
-        HarvestSale.batch_id == batch.id
-    ).all()
+
+    # 与周期分析共用同一截止版本取数口径
+    harvest_sales = visible_sales(db, batch.id, cutoff_version)
+    trace_revenue = float(pricing.decimal_sum(s.total_amount for s in harvest_sales))
     
     return BatchTraceability(
         batch=BatchInfo(
@@ -219,14 +221,22 @@ def batch_traceability(batch_id: int, db: Session = Depends(get_db)):
                 "weight": r.weight,
                 "unit_price": r.unit_price,
                 "total_amount": r.total_amount,
-                "buyer": r.buyer
+                "buyer": r.buyer,
+                "sale_id": r.id,
+                "amount_version": r.amount_version,
+                "amount_status": r.amount_status,
+                "price_scale": r.price_scale,
+                "root_sale_id": r.root_sale_id,
+                "correction_id": r.correction_id,
             } for r in harvest_sales
-        ]
+        ],
+        cutoff_version=cutoff_version,
+        total_revenue=trace_revenue,
     )
 
 @router.get("/trace-by-number/{batch_number}/", response_model=BatchTraceability)
-def trace_by_batch_number(batch_number: str, db: Session = Depends(get_db)):
+def trace_by_batch_number(batch_number: str, cutoff_version: Optional[int] = None, db: Session = Depends(get_db)):
     batch = db.query(Batch).filter(Batch.batch_number == batch_number).first()
     if not batch:
         raise HTTPException(status_code=404, detail=f"批次号 {batch_number} 不存在")
-    return batch_traceability(batch.id, db)
+    return batch_traceability(batch.id, cutoff_version, db)
